@@ -29,11 +29,8 @@ TABELA_2024 = {
     292: 18,   # Sport (subiu)
     277: 19,   # Santos (subiu como campeão Série B 2024)
     2305: 20,  # Mirassol (subiu)
-    # Clubes da temporada 2026 que não estavam em 2025
-    293: 15,   # Athletico-PR (default meio de tabela)
-    294: 15,   # Coritiba (default)
-    315: 18,   # Chapecoense (default rebaixamento)
-    364: 18,   # Retrô (default rebaixamento)
+    # Times promovidos da Série B NÃO são incluídos aqui.
+    # O sistema usa somente tabela atual para eles (Solução 3: decay temporal).
 }
 
 # ==================== MULTIPLICADORES DE CONTEXTO ====================

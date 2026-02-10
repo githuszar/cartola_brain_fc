@@ -227,22 +227,27 @@ class CartolaRecommendation:
         if adversario_id is None:
             return 1.0
 
-        # Posição na tabela do ano anterior (hard-coded)
-        posicao_anterior = TABELA_2024.get(adversario_id, 10)  # default meio de tabela
-
         # Posição na tabela atual
         tabela_atual = self._calcular_tabela_atual(cursor, rodada)
         posicao_atual = tabela_atual.get(adversario_id, 10)
 
-        # Blend híbrido baseado em quantas rodadas já passaram
-        if rodada < 10:
-            peso_atual = MULT_CONFIG['peso_atual_inicio']
-            peso_anterior = MULT_CONFIG['peso_anterior_inicio']
-        else:
-            peso_atual = MULT_CONFIG['peso_atual_meio']
-            peso_anterior = MULT_CONFIG['peso_anterior_meio']
+        # Time promovido (sem histórico Série A) -> somente tabela atual
+        tem_historico = adversario_id in TABELA_2024
 
-        posicao_efetiva = posicao_atual * peso_atual + posicao_anterior * peso_anterior
+        if not tem_historico:
+            posicao_efetiva = posicao_atual
+        else:
+            posicao_anterior = TABELA_2024[adversario_id]
+
+            # Blend híbrido baseado em quantas rodadas já passaram
+            if rodada < 10:
+                peso_atual = MULT_CONFIG['peso_atual_inicio']
+                peso_anterior = MULT_CONFIG['peso_anterior_inicio']
+            else:
+                peso_atual = MULT_CONFIG['peso_atual_meio']
+                peso_anterior = MULT_CONFIG['peso_anterior_meio']
+
+            posicao_efetiva = posicao_atual * peso_atual + posicao_anterior * peso_anterior
 
         # Mapear para multiplicador
         if posicao_efetiva <= 4:
@@ -276,9 +281,9 @@ class CartolaRecommendation:
             return None
         elif tipo == 'adversario':
             if mult >= 1.25:
-                return "vs Lanterna"
+                return "vs Time fraco"
             elif mult >= 1.05:
-                return "vs Fraco"
+                return "vs Historico fraco"
             elif mult <= 0.85:
                 return "vs Top 4"
             elif mult <= 0.95:
@@ -309,11 +314,21 @@ class CartolaRecommendation:
         cache_forma = {}
         # Cache de adversário por clube
         cache_adversario = {}
+        # Cache de abreviacao do clube
+        cache_clube_abrev = {}
 
         for j in jogadores:
             clube_id = j.get('clube_id')
             media_base = j.get('media_num') or 0
             preco = j.get('preco_num') or j.get('preco') or 0
+
+            # Resolver abreviacao do clube se nao existir
+            if not j.get('clube') and clube_id:
+                if clube_id not in cache_clube_abrev:
+                    cursor.execute("SELECT abreviacao FROM clubes WHERE clube_id = ?", (clube_id,))
+                    row = cursor.fetchone()
+                    cache_clube_abrev[clube_id] = row[0] if row else '?'
+                j['clube'] = cache_clube_abrev[clube_id]
 
             # Buscar adversário e mando
             if clube_id not in cache_adversario:
@@ -990,7 +1005,7 @@ Responda de forma clara e objetiva."""
 
                 # Linha principal
                 cap_marker = " [C]" if is_cap else ""
-                texto += f"  {pos_map.get(pos_id, '?'):3s} {nome:<20s} {clube:3s} vs {adv:3s} {mando_icon}\n"
+                texto += f"  {pos_map.get(pos_id, '?'):3s} {nome:<20s} [{clube:3s}]  vs {adv:3s} {mando_icon}\n"
                 texto += f"      C$ {preco:<6.1f} | {media_base:.1f} -> {media_aj:.1f} pts (x{mult:.2f}) | ratio {ratio:.2f}{cap_marker}\n"
 
                 # Contextos se nao neutro
