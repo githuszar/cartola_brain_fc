@@ -136,6 +136,7 @@ Exemplos:
   python sync.py              # Sincroniza rodada atual
   python sync.py --rodada 5   # Sincroniza rodada específica
   python sync.py --force      # Ignora cache, busca dados frescos
+  python sync.py --validar     # Sincroniza E valida recomendacoes
   python sync.py --status     # Mostra status do mercado
   python sync.py --stats      # Mostra estatísticas do banco
   python sync.py --top        # Mostra top jogadores
@@ -178,6 +179,12 @@ Exemplos:
         help="Mostrar top jogadores"
     )
 
+    parser.add_argument(
+        "--validar", "-v",
+        action="store_true",
+        help="Validar recomendacoes apos sincronizacao"
+    )
+
     args = parser.parse_args()
 
     # Executar ação correspondente
@@ -191,6 +198,12 @@ Exemplos:
         resultado = sincronizar(args.rodada, args.force, extras=args.extras)
         if not resultado.get("sucesso"):
             sys.exit(1)
+
+        # Validar recomendacoes se solicitado
+        if args.validar:
+            print("\n")
+            from validar import validar_todas_pendentes
+            validar_todas_pendentes()
 
 
 if __name__ == "__main__":

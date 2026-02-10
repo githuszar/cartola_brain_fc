@@ -296,7 +296,7 @@ class CartolaService:
                     data_hora,
                     partida.get('local'),
                     1 if partida.get('valida', True) else 0,
-                    1 if partida.get('status_transmissao_tr') == 'ENCERRADA' else 0,
+                    self._determinar_partida_encerrada(partida),
                     self.temporada_atual,
                     datetime.now().isoformat()
                 )
@@ -333,6 +333,22 @@ class CartolaService:
         conn.commit()
         conn.close()
         return count
+
+    def _determinar_partida_encerrada(self, partida):
+        """Determina se uma partida esta encerrada.
+
+        Prioridade:
+        1. status_transmissao_tr == 'ENCERRADA'
+        2. Fallback: ambos placares existem
+        """
+        if partida.get('status_transmissao_tr') == 'ENCERRADA':
+            return 1
+        # Fallback: se ambos placares existem, considerar encerrada
+        placar_casa = partida.get('placar_oficial_mandante')
+        placar_visitante = partida.get('placar_oficial_visitante')
+        if placar_casa is not None and placar_visitante is not None:
+            return 1
+        return 0
 
     def _get_adversario_e_mando(self, cursor, clube_id, rodada):
         """Busca adversário e mando de um clube em uma rodada"""

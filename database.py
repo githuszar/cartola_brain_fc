@@ -271,6 +271,9 @@ def init_database():
     )
     """)
 
+    # Tabelas de tracking de recomendacoes
+    _init_recomendacoes_tables(cursor)
+
     conn.commit()
     conn.close()
 
@@ -385,8 +388,252 @@ def migrate_database():
     )
     """)
 
+    # Criar tabelas de tracking de recomendacoes
+    _init_recomendacoes_tables(cursor)
+
     conn.commit()
     conn.close()
+
+
+def _init_recomendacoes_tables(cursor):
+    """Cria tabelas para tracking de recomendacoes (chamada dentro de migrate)"""
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS recomendacoes_salvas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        rodada INTEGER NOT NULL,
+        temporada INTEGER NOT NULL,
+        formacao TEXT NOT NULL,
+        orcamento REAL NOT NULL,
+        custo_total REAL NOT NULL,
+        pontuacao_prevista REAL NOT NULL,
+        pontuacao_real REAL,
+        metodo TEXT NOT NULL,
+        capitao_id INTEGER,
+        criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+        validado_em TEXT,
+        UNIQUE(rodada, temporada, formacao, orcamento, metodo)
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS recomendacao_jogadores (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recomendacao_id INTEGER NOT NULL,
+        jogador_id INTEGER NOT NULL,
+        posicao_id INTEGER NOT NULL,
+        clube_id INTEGER NOT NULL,
+        preco REAL NOT NULL,
+        media_base REAL NOT NULL,
+        media_ajustada REAL NOT NULL,
+        multiplicador REAL NOT NULL,
+        pontuacao_prevista REAL NOT NULL,
+        pontuacao_real REAL,
+        is_capitao INTEGER DEFAULT 0,
+        contextos TEXT,
+        adversario_id INTEGER,
+        mando TEXT,
+        criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (recomendacao_id) REFERENCES recomendacoes_salvas(id) ON DELETE CASCADE,
+        FOREIGN KEY (jogador_id) REFERENCES jogadores(jogador_id),
+        FOREIGN KEY (clube_id) REFERENCES clubes(clube_id)
+    )
+    """)
+
+
+def salvar_recomendacao(rodada, temporada, formacao, orcamento, custo_total,
+                        pontuacao_prevista, metodo, capitao_id, jogadores):
+    """
+    Salva uma recomendacao e seus jogadores no banco.
+    Idempotente: se ja existe para mesma (rodada, temporada, formacao, orcamento, metodo), atualiza.
+
+    Args:
+        jogadores: Lista de dicts com: jogador_id, posicao_id, clube_id,
+                   preco, media_base, media_ajustada, multiplicador,
+                   pontuacao_prevista, is_capitao, contextos, adversario_id, mando
+
+    Returns:
+        recomendacao_id ou None se erro
+    """
+    import json
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            INSERT INTO recomendacoes_salvas
+            (rodada, temporada, formacao, orcamento, custo_total,
+             pontuacao_prevista, metodo, capitao_id, criado_em)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(rodada, temporada, formacao, orcamento, metodo)
+            DO UPDATE SET
+                custo_total = excluded.custo_total,
+                pontuacao_prevista = excluded.pontuacao_prevista,
+                capitao_id = excluded.capitao_id,
+                criado_em = excluded.criado_em,
+                pontuacao_real = NULL,
+                validado_em = NULL
+        """, (rodada, temporada, formacao, orcamento, custo_total,
+              pontuacao_prevista, metodo, capitao_id,
+              datetime.now().isoformat()))
+
+        cursor.execute("""
+            SELECT id FROM recomendacoes_salvas
+            WHERE rodada = ? AND temporada = ? AND formacao = ?
+              AND orcamento = ? AND metodo = ?
+        """, (rodada, temporada, formacao, orcamento, metodo))
+
+        rec_id = cursor.fetchone()[0]
+
+        # Limpar jogadores antigos e reinserir
+        cursor.execute("DELETE FROM recomendacao_jogadores WHERE recomendacao_id = ?", (rec_id,))
+
+        for jog in jogadores:
+            contextos_json = json.dumps(jog.get('contextos', {}))
+            cursor.execute("""
+                INSERT INTO recomendacao_jogadores
+                (recomendacao_id, jogador_id, posicao_id, clube_id,
+                 preco, media_base, media_ajustada, multiplicador,
+                 pontuacao_prevista, is_capitao, contextos,
+                 adversario_id, mando, criado_em)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                rec_id,
+                jog['jogador_id'],
+                jog['posicao_id'],
+                jog['clube_id'],
+                jog['preco'],
+                jog['media_base'],
+                jog['media_ajustada'],
+                jog['multiplicador'],
+                jog['pontuacao_prevista'],
+                1 if jog.get('is_capitao') else 0,
+                contextos_json,
+                jog.get('adversario_id'),
+                jog.get('mando'),
+                datetime.now().isoformat()
+            ))
+
+        conn.commit()
+        return rec_id
+
+    except Exception as e:
+        print(f"[DB] Erro ao salvar recomendacao: {e}")
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
+
+
+def validar_recomendacao(recomendacao_id):
+    """
+    Busca pontuacoes reais dos jogadores e atualiza a recomendacao.
+
+    Returns:
+        dict com {recomendacao_id, rodada, jogadores_validados, pontuacao_real} ou None
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            SELECT rodada, temporada, capitao_id
+            FROM recomendacoes_salvas WHERE id = ?
+        """, (recomendacao_id,))
+
+        rec = cursor.fetchone()
+        if not rec:
+            return None
+
+        rodada, temporada, capitao_id = rec[0], rec[1], rec[2]
+
+        # Verificar se existem pontuacoes reais para esta rodada
+        cursor.execute("""
+            SELECT COUNT(*) FROM pontuacoes_jogadores
+            WHERE rodada = ? AND temporada = ? AND pontuacao IS NOT NULL
+        """, (rodada, temporada))
+        n_pontuacoes = cursor.fetchone()[0]
+
+        if n_pontuacoes == 0:
+            # Rodada ainda nao tem dados reais — nao validar
+            return {'recomendacao_id': recomendacao_id, 'rodada': rodada,
+                    'jogadores_validados': 0, 'pontuacao_real': None,
+                    'sem_dados': True}
+
+        cursor.execute("""
+            SELECT id, jogador_id, is_capitao
+            FROM recomendacao_jogadores WHERE recomendacao_id = ?
+        """, (recomendacao_id,))
+
+        jogadores = cursor.fetchall()
+        pontuacao_real_total = 0
+        jogadores_validados = 0
+
+        for jog_rec_id, jogador_id, is_cap in jogadores:
+            cursor.execute("""
+                SELECT pontuacao FROM pontuacoes_jogadores
+                WHERE jogador_id = ? AND rodada = ? AND temporada = ?
+            """, (jogador_id, rodada, temporada))
+
+            pont_row = cursor.fetchone()
+            pont_real = pont_row[0] if pont_row and pont_row[0] is not None else 0.0
+
+            # Capitao pontua em dobro
+            pont_contribuicao = pont_real * 2 if is_cap else pont_real
+            pontuacao_real_total += pont_contribuicao
+
+            cursor.execute("""
+                UPDATE recomendacao_jogadores SET pontuacao_real = ? WHERE id = ?
+            """, (pont_real, jog_rec_id))
+
+            jogadores_validados += 1
+
+        cursor.execute("""
+            UPDATE recomendacoes_salvas
+            SET pontuacao_real = ?, validado_em = ?
+            WHERE id = ?
+        """, (pontuacao_real_total, datetime.now().isoformat(), recomendacao_id))
+
+        conn.commit()
+
+        return {
+            'recomendacao_id': recomendacao_id,
+            'rodada': rodada,
+            'jogadores_validados': jogadores_validados,
+            'pontuacao_real': pontuacao_real_total
+        }
+
+    except Exception as e:
+        print(f"[DB] Erro ao validar recomendacao {recomendacao_id}: {e}")
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
+
+
+def obter_recomendacoes_pendentes():
+    """Retorna recomendacoes que ainda nao foram validadas (pontuacao_real IS NULL)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT id, rodada, temporada, formacao, orcamento, metodo,
+               pontuacao_prevista, criado_em
+        FROM recomendacoes_salvas
+        WHERE pontuacao_real IS NULL
+        ORDER BY rodada ASC, criado_em DESC
+    """)
+
+    recs = []
+    for row in cursor.fetchall():
+        recs.append({
+            'id': row[0], 'rodada': row[1], 'temporada': row[2],
+            'formacao': row[3], 'orcamento': row[4], 'metodo': row[5],
+            'pontuacao_prevista': row[6], 'criado_em': row[7]
+        })
+
+    conn.close()
+    return recs
 
 
 def get_stats():
